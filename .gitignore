@@ -1,0 +1,21 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# LaTeX build files
+overleaf/*.aux
+overleaf/*.bbl
+overleaf/*.blg
+overleaf/*.log
+overleaf/*.out
+overleaf/*.synctex.gz
+
+overleaf/
+data/
