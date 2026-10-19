@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+.cache/
 
 # LaTeX build files
 overleaf/*.aux
@@ -19,3 +20,5 @@ overleaf/*.synctex.gz
 
 overleaf/
 data/
+.env
+cache/

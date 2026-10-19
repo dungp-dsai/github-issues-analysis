@@ -1,0 +1,13 @@
+,value
+cohen_kappa,0.8189978537182843
+kappa_ci_low,0.7843422866820473
+kappa_ci_high,0.8502403172527492
+percent_agreement,0.8556390977443609
+n,665
+ami_topic_deepseek,0.04630485993102536
+ami_topic_gpt,0.05074328500200927
+nmi_topic_deepseek,0.06668631521740737
+nmi_topic_gpt,0.07143698606057007
+ami_topic_consensus,0.05739942078969756
+n_topics,10
+encoder,sentence-transformers/all-MiniLM-L6-v2
