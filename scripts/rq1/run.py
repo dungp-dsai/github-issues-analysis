@@ -16,24 +16,20 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.common import (  # noqa: E402
-    BOT_COLOR,
     RESULTS,
-    USER_COLOR,
-    apply_fdr,
-    exclude_dominant_bot,
     load_issue_labels,
-    one_issue_per_repo,
     prepare_issues,
     split_groups,
-    test_binary,
     test_categorical,
     test_numeric,
+    test_two_proportion,
 )
 
 OUT = RESULTS / "rq1"
@@ -54,7 +50,8 @@ def numeric_rows(family: str, frame: pd.DataFrame, columns: list[tuple[str, str]
     return rows
 
 
-def binary_rows(family: str, frame: pd.DataFrame, columns: list[tuple[str, str]]) -> list[dict]:
+def proportion_rows(family: str, frame: pd.DataFrame, columns: list[tuple[str, str]]) -> list[dict]:
+    """Two-proportion Z-tests for binary outcomes."""
     bot, user = split_groups(frame)
     rows = []
     for outcome, column in columns:
@@ -62,7 +59,7 @@ def binary_rows(family: str, frame: pd.DataFrame, columns: list[tuple[str, str]]
             _row(
                 family,
                 outcome,
-                test_binary(
+                test_two_proportion(
                     int(bot[column].sum()),
                     int(len(bot)),
                     int(user[column].sum()),
@@ -73,214 +70,410 @@ def binary_rows(family: str, frame: pd.DataFrame, columns: list[tuple[str, str]]
     return rows
 
 
-def primary_tests(frame: pd.DataFrame, family: str = "primary") -> list[dict]:
-    rows = numeric_rows(
-        family,
-        frame,
-        [
-            ("body_characters", "body_chars"),
-            ("title_characters", "title_chars"),
-            ("n_labels", "n_labels"),
-            ("n_gharchive_events", "n_gharchive_events"),
-        ],
-    )
+def frequent_labels(frame: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
+    """Issue-label rows whose label appears on at least 30 issues in the analysis set."""
+    linked = labels.merge(frame[["issue_id", "author_type"]], on="issue_id", how="inner")
+    counts = linked.groupby("label")["issue_id"].nunique()
+    frequent = counts[counts >= 30].index
+    return linked.loc[linked["label"].isin(frequent)].copy()
+
+
+def approach_tests(frame: pd.DataFrame, labels: pd.DataFrame) -> list[dict]:
+    """Tests named in the RQ1 approach.
+
+    Numeric outcomes use a two-sided Mann-Whitney U test. Binary outcomes use a
+    two-proportion Z-test. Categorical outcomes use a chi-square test of
+    independence. Significance is p < 0.05.
+    """
+    rows: list[dict] = []
     closed = frame.loc[frame["api_closed"] & frame["resolution_hours"].notna()]
-    bot, user = split_groups(closed)
-    rows.append(_row(family, "resolution_hours_if_api_closed", test_numeric(bot["resolution_hours"], user["resolution_hours"])))
+    bot_closed, user_closed = split_groups(closed)
+    rows.append(
+        _row(
+            "lifecycle",
+            "resolution_hours_if_api_closed",
+            test_numeric(bot_closed["resolution_hours"], user_closed["resolution_hours"]),
+        )
+    )
+    rows.extend(proportion_rows("lifecycle", frame, [("api_state_closed", "api_closed")]))
+    bot_reason, user_reason = split_groups(frame.loc[frame["api_closed"]])
+    reason = test_categorical(
+        bot_reason["state_reason"].fillna("(missing)"),
+        user_reason["state_reason"].fillna("(missing)"),
+    )
+    reason.pop("table", None)
+    rows.append(_row("lifecycle", "state_reason_if_api_closed", reason))
+
     rows.extend(
-        binary_rows(
-            family,
+        numeric_rows(
+            "metadata",
             frame,
             [
-                ("api_state_closed", "api_closed"),
-                ("has_label", "has_label"),
-                ("has_milestone", "has_milestone"),
-                ("locked", "locked"),
-                ("body_empty", "body_empty"),
+                ("n_labels", "n_labels"),
+                ("n_gharchive_events", "n_gharchive_events"),
             ],
         )
     )
-    bot_all, user_all = split_groups(frame.loc[frame["api_closed"]])
-    reason = test_categorical(bot_all["state_reason"].fillna("(missing)"), user_all["state_reason"].fillna("(missing)"))
-    reason.pop("table", None)
-    rows.append(_row(family, "state_reason_if_api_closed", reason))
-    return rows
-
-
-def secondary_tests(frame: pd.DataFrame, labels: pd.DataFrame) -> list[dict]:
-    rows = binary_rows(
-        "secondary_text_and_timing",
-        frame,
-        [
-            ("body_has_code_fence", "has_code_fence"),
-            ("body_has_url", "has_url"),
-            ("body_has_markdown_heading", "has_heading"),
-            ("body_has_checklist", "has_checklist"),
-            ("created_on_weekend_utc", "created_weekend"),
-            ("archive_state_equals_api_state", "archive_matches_api"),
-        ],
+    rows.extend(
+        proportion_rows(
+            "metadata",
+            frame,
+            [
+                ("has_label", "has_label"),
+                ("has_milestone", "has_milestone"),
+            ],
+        )
     )
-    bot, user = split_groups(frame)
-    hour = test_categorical(bot["created_hour"].astype(int).astype(str), user["created_hour"].astype(int).astype(str))
-    hour.pop("table", None)
-    rows.append(_row("secondary_text_and_timing", "api_created_hour_utc", hour))
+    linked = frequent_labels(frame, labels)
+    categories = test_categorical(
+        linked.loc[linked["author_type"].eq("Bot"), "label"],
+        linked.loc[linked["author_type"].eq("User"), "label"],
+    )
+    categories.pop("table", None)
+    rows.append(_row("metadata", "label_categories", categories))
 
-    linked = labels.merge(frame[["issue_id", "author_type"]], on="issue_id", how="inner")
-    counts = linked.groupby("label")["issue_id"].nunique()
-    frequent = counts[counts >= 30].index.tolist()
     issue_ids = frame[["issue_id", "author_type"]]
-    for label in frequent:
+    for label in sorted(linked["label"].unique()):
         holders = set(linked.loc[linked["label"].eq(label), "issue_id"])
-        flagged = issue_ids.assign(has_label=issue_ids["issue_id"].isin(holders))
-        b = flagged.loc[flagged["author_type"].eq("Bot"), "has_label"]
-        u = flagged.loc[flagged["author_type"].eq("User"), "has_label"]
+        flagged = issue_ids.assign(present=issue_ids["issue_id"].isin(holders))
+        bot_flag = flagged.loc[flagged["author_type"].eq("Bot"), "present"]
+        user_flag = flagged.loc[flagged["author_type"].eq("User"), "present"]
         rows.append(
             _row(
-                "secondary_labels",
+                "label_presence",
                 f"label::{label}",
-                test_binary(int(b.sum()), int(len(b)), int(u.sum()), int(len(u))),
+                test_two_proportion(int(bot_flag.sum()), int(len(bot_flag)), int(user_flag.sum()), int(len(user_flag))),
             )
         )
+
+    rows.extend(
+        numeric_rows(
+            "content",
+            frame,
+            [
+                ("title_characters", "title_chars"),
+                ("body_characters", "body_chars"),
+            ],
+        )
+    )
+    rows.extend(
+        proportion_rows(
+            "content",
+            frame,
+            [
+                ("body_empty", "body_empty"),
+                ("body_has_url", "has_url"),
+                ("body_has_markdown_heading", "has_heading"),
+                ("body_has_code_fence", "has_code_fence"),
+                ("body_has_checklist", "has_checklist"),
+            ],
+        )
+    )
     return rows
+
+
+ACCOUNT_ORDER = ["Bot", "User"]
 
 
 def _style():
+    sns.set_theme(style="whitegrid", palette="pastel")
     plt.rcParams.update(
         {
             "font.size": 9,
             "axes.titlesize": 10,
-            "axes.labelsize": 9,
-            "figure.dpi": 150,
+            "axes.labelsize": 8.5,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "legend.fontsize": 8,
+            "figure.dpi": 160,
             "savefig.dpi": 300,
             "pdf.fonttype": 42,
-            "axes.spines.top": False,
-            "axes.spines.right": False,
+            "ps.fonttype": 42,
+            "axes.titleweight": "medium",
+            "axes.labelcolor": "#2c2c2c",
+            "text.color": "#2c2c2c",
+            "xtick.color": "#3a3a3a",
+            "ytick.color": "#3a3a3a",
+            "figure.facecolor": "white",
+            "axes.facecolor": "white",
         }
     )
 
 
-def plot_binary_rates(frame: pd.DataFrame, path: Path) -> None:
-    specs = [
-        ("api_closed", "API state closed"),
-        ("has_label", "Has a label"),
-        ("has_milestone", "Has a milestone"),
-        ("locked", "Conversation locked"),
-        ("body_empty", "Empty body"),
-        ("has_code_fence", "Body has code fence"),
-        ("has_heading", "Body has heading"),
-        ("has_url", "Body has URL"),
-    ]
-    bot, user = split_groups(frame)
-    labels = [label for _, label in specs]
-    bot_rates = [100 * bot[col].mean() for col, _ in specs]
-    user_rates = [100 * user[col].mean() for col, _ in specs]
-    y = np.arange(len(labels))
-    fig, ax = plt.subplots(figsize=(7.0, 3.4))
-    ax.barh(y + 0.18, bot_rates, height=0.36, color=BOT_COLOR, label="Bot")
-    ax.barh(y - 0.18, user_rates, height=0.36, color=USER_COLOR, label="User")
-    ax.set_yticks(y, labels)
-    ax.set_xlabel("Percent of issues")
-    ax.set_xlim(0, 100)
-    ax.legend(frameon=False, loc="lower right")
-    ax.set_title("Issue attributes by author account type")
-    fig.tight_layout()
-    fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
+def _save(fig: plt.Figure, path: Path) -> None:
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
 
 
-def plot_lengths(frame: pd.DataFrame, path: Path) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.2))
-    for ax, column, title, xlabel in [
-        (axes[0], "body_chars", "Issue body length", "Characters (log scale)"),
-        (axes[1], "title_chars", "Issue title length", "Characters"),
-    ]:
-        data = [
-            frame.loc[frame["author_type"].eq("Bot"), column].clip(lower=1 if column == "body_chars" else 0),
-            frame.loc[frame["author_type"].eq("User"), column].clip(lower=1 if column == "body_chars" else 0),
-        ]
-        box = ax.boxplot(
-            data,
-            tick_labels=["Bot", "User"],
-            showfliers=False,
-            patch_artist=True,
-            medianprops={"color": "black"},
-        )
-        for patch, color in zip(box["boxes"], [BOT_COLOR, USER_COLOR]):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.8)
-        if column == "body_chars":
-            ax.set_yscale("log")
-        ax.set_title(title)
-        ax.set_ylabel(xlabel)
-    fig.tight_layout()
-    fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
-    plt.close(fig)
+def _account_frame(categories: list[str], bot_values: list[float], user_values: list[float], value_name: str) -> pd.DataFrame:
+    rows = []
+    for category, bot_value, user_value in zip(categories, bot_values, user_values):
+        rows.append({"Metric": category, "Account": "Bot", value_name: bot_value})
+        rows.append({"Metric": category, "Account": "User", value_name: user_value})
+    return pd.DataFrame(rows)
 
 
-def plot_resolution(frame: pd.DataFrame, path: Path) -> None:
-    closed = frame.loc[frame["api_closed"] & frame["resolution_hours"].notna()]
-    fig, ax = plt.subplots(figsize=(4.2, 3.2))
-    data = [
-        closed.loc[closed["author_type"].eq("Bot"), "resolution_hours"],
-        closed.loc[closed["author_type"].eq("User"), "resolution_hours"],
-    ]
-    box = ax.boxplot(
-        data,
-        tick_labels=["Bot", "User"],
-        showfliers=False,
-        patch_artist=True,
-        medianprops={"color": "black"},
+def _polish_bars(ax: plt.Axes) -> None:
+    for container in ax.containers:
+        for bar in container:
+            bar.set_linewidth(0.7)
+            bar.set_edgecolor("white")
+
+
+def _label_bars(ax: plt.Axes, fmt: str, fontsize: float = 7.5) -> None:
+    for container in ax.containers:
+        ax.bar_label(container, fmt=fmt, padding=2, fontsize=fontsize, color="#333333")
+
+
+def _legend(fig: plt.Figure, ax: plt.Axes) -> None:
+    handles, labels = ax.get_legend_handles_labels()
+    if ax.legend_ is not None:
+        ax.legend_.remove()
+    fig.legend(
+        handles,
+        labels,
+        title=None,
+        loc="upper center",
+        ncol=2,
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.04),
+        handlelength=1.2,
+        columnspacing=1.4,
     )
-    for patch, color in zip(box["boxes"], [BOT_COLOR, USER_COLOR]):
-        patch.set_facecolor(color)
-        patch.set_alpha(0.8)
-    ax.set_yscale("symlog", linthresh=1)
-    ax.set_ylabel("Hours from API created to API closed")
-    ax.set_title("Resolution time when api_state is closed")
-    fig.tight_layout()
-    fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
-    plt.close(fig)
 
 
-def plot_state_reason(frame: pd.DataFrame, path: Path) -> None:
-    closed = frame.loc[frame["api_closed"]].copy()
-    closed["reason"] = closed["state_reason"].fillna("(missing)")
-    rates = pd.crosstab(closed["author_type"], closed["reason"], normalize="index").reindex(["Bot", "User"]) * 100
-    fig, ax = plt.subplots(figsize=(5.6, 3.2))
-    x = np.arange(len(rates.columns))
-    ax.bar(x - 0.18, rates.loc["Bot"], width=0.36, color=BOT_COLOR, label="Bot")
-    ax.bar(x + 0.18, rates.loc["User"], width=0.36, color=USER_COLOR, label="User")
-    ax.set_xticks(x, rates.columns, rotation=20, ha="right")
-    ax.set_ylabel("Percent of API-closed issues")
-    ax.set_title("GitHub close reason (state_reason)")
-    ax.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
-    plt.close(fig)
+def _pretty_reason(name: str) -> str:
+    if name in {"(missing)", "nan", "None"}:
+        return "Missing"
+    return str(name).replace("_", " ")
 
 
-def plot_hours(frame: pd.DataFrame, path: Path) -> None:
-    hours = list(range(24))
+def plot_lifecycle(frame: pd.DataFrame, path: Path) -> None:
+    """One figure, three panels: state, resolution time, close reason."""
     bot, user = split_groups(frame)
-    bot_share = bot["created_hour"].value_counts(normalize=True).reindex(hours, fill_value=0) * 100
-    user_share = user["created_hour"].value_counts(normalize=True).reindex(hours, fill_value=0) * 100
-    fig, ax = plt.subplots(figsize=(7.0, 3.0))
-    ax.plot(hours, bot_share, color=BOT_COLOR, marker="o", ms=3, label="Bot")
-    ax.plot(hours, user_share, color=USER_COLOR, marker="o", ms=3, label="User")
-    ax.set_xlabel("Hour of api_created_at (UTC)")
-    ax.set_ylabel("Percent of issues")
-    ax.set_xticks(hours)
-    ax.set_ylim(0, max(bot_share.max(), user_share.max()) * 1.25)
-    ax.set_title("Issue creation hour")
-    ax.legend(frameon=False)
+    state = _account_frame(
+        ["Closed", "Open"],
+        [100 * bot["api_closed"].mean(), 100 * (1 - bot["api_closed"].mean())],
+        [100 * user["api_closed"].mean(), 100 * (1 - user["api_closed"].mean())],
+        "Percent",
+    )
+    closed = frame.loc[frame["api_closed"] & frame["resolution_hours"].notna()].copy()
+    closed["Account"] = closed["author_type"]
+    reasons = closed["state_reason"].fillna("Missing").astype(str)
+    preferred = ["completed", "not_planned"]
+    present = list(reasons.unique())
+    ordered = [name for name in preferred if name in present]
+    ordered.extend(sorted(name for name in present if name not in preferred and name != "Missing"))
+    if "Missing" in present:
+        ordered.append("Missing")
+    reason_frame = closed.assign(reason=reasons)
+    rates = (
+        pd.crosstab(reason_frame["Account"], reason_frame["reason"], normalize="index")
+        .reindex(index=ACCOUNT_ORDER, columns=ordered)
+        .fillna(0)
+        * 100
+    )
+    reason_plot = _account_frame(
+        [_pretty_reason(name) for name in ordered],
+        [float(rates.loc["Bot", name]) for name in ordered],
+        [float(rates.loc["User", name]) for name in ordered],
+        "Percent",
+    )
+
+    fig, axes = plt.subplots(1, 3, figsize=(7.25, 3.25), gridspec_kw={"width_ratios": [1.05, 1.0, 1.2]})
+
+    sns.barplot(
+        data=state,
+        x="Metric",
+        y="Percent",
+        hue="Account",
+        hue_order=ACCOUNT_ORDER,
+        order=["Closed", "Open"],
+        palette="pastel",
+        saturation=1,
+        width=0.72,
+        ax=axes[0],
+    )
+    _polish_bars(axes[0])
+    _label_bars(axes[0], "%.1f")
+    axes[0].set_ylim(0, 100)
+    axes[0].set_xlabel("")
+    axes[0].set_ylabel("Percent of issues")
+    axes[0].set_title("(a) Issue state")
+
+    sns.boxplot(
+        data=closed,
+        x="Account",
+        y="resolution_hours",
+        order=ACCOUNT_ORDER,
+        hue="Account",
+        hue_order=ACCOUNT_ORDER,
+        palette="pastel",
+        saturation=1,
+        width=0.55,
+        showfliers=False,
+        legend=False,
+        linewidth=0.8,
+        medianprops={"color": "#2b2b2b", "linewidth": 1.5},
+        whiskerprops={"color": "#6d6d6d", "linewidth": 0.8},
+        capprops={"color": "#6d6d6d", "linewidth": 0.8},
+        boxprops={"edgecolor": "#8a8a8a", "linewidth": 0.7},
+        ax=axes[1],
+    )
+    axes[1].set_yscale("symlog", linthresh=1)
+    axes[1].set_ylim(0.01, 8000)
+    axes[1].set_yticks([0.1, 1, 10, 100, 1000])
+    axes[1].set_yticklabels(["0.1", "1", "10", "100", "1,000"])
+    axes[1].set_xlabel("")
+    axes[1].set_ylabel("Hours (symlog)")
+    axes[1].set_title("(b) Resolution time")
+    for index, account in enumerate(ACCOUNT_ORDER):
+        median = float(closed.loc[closed["Account"].eq(account), "resolution_hours"].median())
+        axes[1].annotate(
+            f"{median:.0f} h",
+            xy=(index, median),
+            xytext=(0, 7),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=7.5,
+            color="#333333",
+        )
+
+    sns.barplot(
+        data=reason_plot,
+        x="Metric",
+        y="Percent",
+        hue="Account",
+        hue_order=ACCOUNT_ORDER,
+        order=[_pretty_reason(name) for name in ordered],
+        palette="pastel",
+        saturation=1,
+        width=0.72,
+        ax=axes[2],
+    )
+    _polish_bars(axes[2])
+    _label_bars(axes[2], "%.1f")
+    axes[2].set_ylim(0, 118)
+    axes[2].set_xlabel("")
+    axes[2].set_ylabel("Percent of closed issues")
+    axes[2].set_title("(c) Close reason")
+    axes[2].tick_params(axis="x", labelsize=7.5, labelrotation=18)
+    for tick in axes[2].get_xticklabels():
+        tick.set_ha("right")
+
+    _legend(fig, axes[0])
+    if axes[2].legend_ is not None:
+        axes[2].legend_.remove()
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    _save(fig, path)
+
+
+def plot_metadata_counts(frame: pd.DataFrame, path: Path) -> None:
+    """Grouped columns for the three metadata count summaries."""
+    bot, user = split_groups(frame)
+    plot_df = _account_frame(
+        ["Label count", "Archive events", "Milestone"],
+        [
+            float(bot["n_labels"].mean()),
+            float(bot["n_gharchive_events"].mean()),
+            100 * float(bot["has_milestone"].mean()),
+        ],
+        [
+            float(user["n_labels"].mean()),
+            float(user["n_gharchive_events"].mean()),
+            100 * float(user["has_milestone"].mean()),
+        ],
+        "Value",
+    )
+    # Milestone is a share. Plot it on its own axis so a 3% bar is readable
+    # beside means that sit near 1.
+    count_df = plot_df.loc[plot_df["Metric"].isin(["Label count", "Archive events"])]
+    milestone_df = plot_df.loc[plot_df["Metric"].eq("Milestone")]
+
+    fig, axes = plt.subplots(1, 3, figsize=(7.25, 3.05), gridspec_kw={"width_ratios": [1.15, 1.15, 0.85]})
+    panels = [
+        (axes[0], count_df.loc[count_df["Metric"].eq("Label count")], "Label count", "Mean labels per issue", "{:.2f}", 0, 1.7),
+        (axes[1], count_df.loc[count_df["Metric"].eq("Archive events")], "Archive events", "Mean events per issue", "{:.2f}", 0, 2.05),
+        (axes[2], milestone_df, "Milestone", "Percent of issues", "{:.1f}", 0, 6),
+    ]
+    for ax, data, title, ylabel, fmt, ymin, ymax in panels:
+        sns.barplot(
+            data=data,
+            x="Account",
+            y="Value",
+            order=ACCOUNT_ORDER,
+            hue="Account",
+            hue_order=ACCOUNT_ORDER,
+            palette="pastel",
+            saturation=1,
+            width=0.62,
+            legend=False,
+            ax=ax,
+        )
+        _polish_bars(ax)
+        _label_bars(ax, fmt)
+        ax.set_ylim(ymin, ymax)
+        ax.set_xlabel("")
+        ax.set_ylabel(ylabel)
+        ax.set_title(title)
+    handles = [
+        plt.Rectangle((0, 0), 1, 1, facecolor=sns.color_palette("pastel")[0], edgecolor="white", linewidth=0.7),
+        plt.Rectangle((0, 0), 1, 1, facecolor=sns.color_palette("pastel")[1], edgecolor="white", linewidth=0.7),
+    ]
+    fig.legend(handles, ACCOUNT_ORDER, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 1.04))
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    _save(fig, path)
+
+
+def plot_metadata_labels(frame: pd.DataFrame, labels: pd.DataFrame, path: Path) -> None:
+    """Side-by-side horizontal bars: top 5 labels within bot issues and within user issues."""
+    linked = labels.merge(frame[["issue_id", "author_type"]], on="issue_id", how="inner")
+    bot, user = split_groups(frame)
+    rows = []
+    for label in linked["label"].dropna().unique():
+        holders = set(linked.loc[linked["label"].eq(label), "issue_id"])
+        rows.append(
+            {
+                "Label": label,
+                "Bot": 100 * float(bot["issue_id"].isin(holders).mean()),
+                "User": 100 * float(user["issue_id"].isin(holders).mean()),
+            }
+        )
+    rates = pd.DataFrame(rows)
+    bot_top = rates.sort_values(["Bot", "Label"], ascending=[False, True]).head(5)
+    user_top = rates.sort_values(["User", "Label"], ascending=[False, True]).head(5)
+    peak = float(max(bot_top["Bot"].max(), user_top["User"].max()))
+
+    fig, axes = plt.subplots(1, 2, figsize=(7.25, 3.35), sharex=True)
+    panels = [
+        (axes[0], bot_top, "Bot", "(a) Top 5 labels on bot issues"),
+        (axes[1], user_top, "User", "(b) Top 5 labels on user issues"),
+    ]
+    colors = {"Bot": sns.color_palette("pastel")[0], "User": sns.color_palette("pastel")[1]}
+    for ax, selected, account, title in panels:
+        # Seaborn draws the first category at the top, so the largest share comes first.
+        ordered = selected.sort_values([account, "Label"], ascending=[False, True])
+        sns.barplot(
+            data=ordered,
+            y="Label",
+            x=account,
+            order=ordered["Label"].tolist(),
+            color=colors[account],
+            saturation=1,
+            width=0.72,
+            orient="y",
+            ax=ax,
+        )
+        _polish_bars(ax)
+        texts = ["<0.1" if value < 0.05 else f"{value:.1f}" for value in ordered[account]]
+        ax.bar_label(ax.containers[0], labels=texts, padding=3, fontsize=8, color="#333333")
+        ax.set_xlim(0, max(peak * 1.22, 5))
+        ax.set_ylabel("")
+        ax.set_xlabel("Percent of issues")
+        ax.set_title(title)
     fig.tight_layout()
-    fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
-    plt.close(fig)
+    _save(fig, path)
 
 
 def describe_population(frame: pd.DataFrame) -> pd.DataFrame:
@@ -307,11 +500,8 @@ def main() -> None:
     issues = prepare_issues()
     labels = load_issue_labels()
 
-    rows = primary_tests(issues, "primary")
-    rows.extend(secondary_tests(issues, labels))
-    rows.extend(primary_tests(exclude_dominant_bot(issues), "robustness_without_coderabbitai"))
-    rows.extend(primary_tests(one_issue_per_repo(issues), "robustness_one_issue_per_repo"))
-    tested = apply_fdr(pd.DataFrame(rows))
+    tested = pd.DataFrame(approach_tests(issues, labels))
+    tested["significant_0.05"] = tested["p_value"] < 0.05
     tested.to_csv(OUT / "tests.csv", index=False)
 
     describe_population(issues).to_csv(OUT / "population.csv", index=False)
@@ -325,19 +515,16 @@ def main() -> None:
     )
     authors.groupby("author_type").head(15).to_csv(OUT / "top_authors.csv", index=False)
 
-    plot_binary_rates(issues, OUT / "attribute_rates.pdf")
-    plot_lengths(issues, OUT / "text_length.pdf")
-    plot_resolution(issues, OUT / "resolution_hours.pdf")
-    plot_state_reason(issues, OUT / "state_reason.pdf")
-    plot_hours(issues, OUT / "created_hour.pdf")
+    plot_lifecycle(issues, OUT / "lifecycle_resolution.pdf")
+    plot_metadata_counts(issues, OUT / "metadata_counts.pdf")
+    plot_metadata_labels(issues, labels, OUT / "metadata_labels.pdf")
 
-    primary = tested.loc[tested["family"].eq("primary") & tested["significant_fdr_0.05"]]
     print(f"Wrote {OUT}")
     print(f"Issues after dropping pull requests: {len(issues)}")
     print(issues["author_type"].value_counts().to_string())
-    print("Primary results with FDR q < 0.05:")
-    cols = ["outcome", "bot_stat", "user_stat", "p_value", "p_fdr", "effect", "effect_interp"]
-    print(primary[cols].to_string(index=False))
+    print("Tests with p < 0.05:")
+    cols = ["family", "outcome", "test", "bot_stat", "user_stat", "statistic", "p_value"]
+    print(tested.loc[tested["significant_0.05"], cols].to_string(index=False))
 
 
 if __name__ == "__main__":

@@ -454,7 +454,6 @@ def plot_grouped_prevalence(frame: pd.DataFrame, column: str, order: list[str], 
     ax.legend(frameon=False)
     fig.tight_layout()
     fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
     plt.close(fig)
 
 
@@ -475,7 +474,6 @@ def plot_heatmap(matrix: pd.DataFrame, title: str, path: Path, xlabel: str, ylab
     fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
     fig.tight_layout()
     fig.savefig(path)
-    fig.savefig(path.with_suffix(".png"))
     plt.close(fig)
 
 

@@ -204,6 +204,51 @@ def _odds_ratio_bot_over_user(a: int, b: int, c: int, d: int) -> float:
     return float((a / b) / (c / d))
 
 
+def test_two_proportion(bot_true: int, bot_n: int, user_true: int, user_n: int) -> dict:
+    """Two-sided two-proportion Z-test with the pooled standard error under H0."""
+    result = {
+        "test": "two-proportion Z",
+        "n_bot": int(bot_n),
+        "n_user": int(user_n),
+        "bot_stat": float(bot_true / bot_n) if bot_n else float("nan"),
+        "user_stat": float(user_true / user_n) if user_n else float("nan"),
+        "bot_q1": float("nan"),
+        "bot_q3": float("nan"),
+        "user_q1": float("nan"),
+        "user_q3": float("nan"),
+        "bot_mean": float("nan"),
+        "user_mean": float("nan"),
+        "statistic": float("nan"),
+        "p_value": float("nan"),
+        "effect_name": "rate bot minus rate user",
+        "effect": float("nan"),
+        "effect_interp": "",
+        "estimate_name": "rate bot minus rate user",
+        "estimate": float("nan"),
+        "ci_low": float("nan"),
+        "ci_high": float("nan"),
+    }
+    if bot_n == 0 or user_n == 0:
+        result["p_value"] = 1.0
+        result["statistic"] = 0.0
+        return result
+    p1 = result["bot_stat"]
+    p2 = result["user_stat"]
+    pooled = (bot_true + user_true) / (bot_n + user_n)
+    se = math.sqrt(pooled * (1.0 - pooled) * (1.0 / bot_n + 1.0 / user_n))
+    if se == 0:
+        z_stat = 0.0
+        p_value = 1.0
+    else:
+        z_stat = (p1 - p2) / se
+        p_value = float(2.0 * stats.norm.sf(abs(z_stat)))
+    result["statistic"] = float(z_stat)
+    result["p_value"] = p_value
+    result["effect"] = float(p1 - p2)
+    result["estimate"] = float(p1 - p2)
+    return result
+
+
 def test_binary(bot_true: int, bot_n: int, user_true: int, user_n: int) -> dict:
     table = np.array(
         [
