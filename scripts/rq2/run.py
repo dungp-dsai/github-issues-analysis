@@ -200,7 +200,7 @@ def plot_rates(frame: pd.DataFrame, path: Path) -> None:
     y = np.arange(len(specs))
     fig, ax = plt.subplots(figsize=(5.4, 2.6))
     ax.barh(y + 0.18, [100 * bot[c].mean() for c, _ in specs], height=0.36, color=BOT_COLOR, label="Bot")
-    ax.barh(y - 0.18, [100 * user[c].mean() for c, _ in specs], height=0.36, color=USER_COLOR, label="User")
+    ax.barh(y - 0.18, [100 * user[c].mean() for c, _ in specs], height=0.36, color=USER_COLOR, label="Human")
     ax.set_yticks(y, [label for _, label in specs])
     ax.set_xlabel("Percent of issues")
     ax.set_xlim(0, 100)
@@ -224,7 +224,7 @@ def plot_counts(frame: pd.DataFrame, path: Path) -> None:
         ]
         box = ax.boxplot(
             data,
-            tick_labels=["Bot", "User"],
+            tick_labels=["Bot", "Human"],
             showfliers=False,
             patch_artist=True,
             medianprops={"color": "black"},
@@ -254,7 +254,7 @@ def plot_comments(frame: pd.DataFrame, comments: pd.DataFrame, path: Path) -> No
 
     rates = [100 * float(bot["has_comment_api"].mean()), 100 * float(user["has_comment_api"].mean())]
     bars = axes[0].bar(
-        ["Bot", "User"],
+        ["Bot", "Human"],
         rates,
         color=colors,
         width=0.62,
@@ -306,7 +306,7 @@ def plot_comments(frame: pd.DataFrame, comments: pd.DataFrame, path: Path) -> No
             color="#222222",
             zorder=5,
         )
-    axes[1].set_xticks([1, 2], ["Bot", "User"])
+    axes[1].set_xticks([1, 2], ["Bot", "Human"])
     axes[1].set_xlim(0.4, 2.6)
     axes[1].set_ylim(-400, y_max)
     axes[1].set_ylabel("Characters")
@@ -438,7 +438,7 @@ def plot_comment_keywords(frame: pd.DataFrame, comments: pd.DataFrame, path: Pat
     rows = []
     for ax, account, anchor, title in (
         (axes[0], "Bot", anchors[0], "(a) Bot"),
-        (axes[1], "User", anchors[1], "(b) User"),
+        (axes[1], "User", anchors[1], "(b) Human"),
     ):
         counts = comment_keywords(linked.loc[linked["author_type"].eq(account), "body"])
         for rank, (word, count) in enumerate(counts.most_common(40), start=1):
@@ -528,7 +528,7 @@ def plot_reactions(frame: pd.DataFrame, path: Path) -> None:
     groups = {"Bot": bot, "User": user}
     panels = (
         (axes[0], "Bot", "(a) Bot"),
-        (axes[1], "User", "(b) User"),
+        (axes[1], "User", "(b) Human"),
     )
     for ax, account, title in panels:
         ordered = rates.sort_values([account, "reaction"], ascending=[False, True])
@@ -677,7 +677,7 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
     ax_bar, ax = axes
     bot, user = split_groups(frame)
     rates = [100 * float(bot["has_assignee"].mean()), 100 * float(user["has_assignee"].mean())]
-    bars = ax_bar.bar(["Bot", "User"], rates, color=[pastel[0], pastel[1]], width=0.62, edgecolor="white", linewidth=0.7, zorder=2)
+    bars = ax_bar.bar(["Bot", "Human"], rates, color=[pastel[0], pastel[1]], width=0.62, edgecolor="white", linewidth=0.7, zorder=2)
     ax_bar.bar_label(bars, fmt="%.1f", padding=3, fontsize=8, color="#333333")
     ax_bar.set_ylim(0, 100)
     ax_bar.set_ylabel("Percent of issues")
@@ -731,13 +731,14 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
     for name in source_order:
         _draw_node(source_boxes[name], x0, source_color[name])
         center = _center(source_boxes[name])
-        _stick(x0, center, x0 - 0.015, center, name, "right")
+        _stick(x0, center, x0 - 0.015, center, "Human" if name == "User" else name, "right")
 
     outside = []
     for name in dest_order:
         _draw_node(dest_boxes[name], x1, dest_color[name])
         lo, hi = dest_boxes[name]
-        outside.append(((lo + hi) / 2, "Unknown User Type" if name == "Other" else name))
+        shown = "Unknown Human Type" if name == "Other" else ("Human" if name == "User" else name)
+        outside.append(((lo + hi) / 2, shown))
 
     outside.sort()
     min_gap = total_height * 0.075

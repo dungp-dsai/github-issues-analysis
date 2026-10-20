@@ -196,11 +196,31 @@ def _style():
             "ytick.color": "#3a3a3a",
             "figure.facecolor": "white",
             "axes.facecolor": "white",
+            "axes.grid": False,
         }
     )
 
 
+def _human_label(value: str) -> str:
+    if value == "User":
+        return "Human"
+    return value.replace("user issues", "human issues")
+
+
 def _save(fig: plt.Figure, path: Path) -> None:
+    for ax in fig.axes:
+        ax.grid(False)
+    fig.canvas.draw()
+    for ax in fig.axes:
+        for axis in (ax.xaxis, ax.yaxis):
+            labels = [tick.get_text() for tick in axis.get_ticklabels()]
+            if any(label == "User" or "user issues" in label for label in labels):
+                axis.set_ticks(axis.get_ticklocs())
+                axis.set_ticklabels([_human_label(label) for label in labels])
+    for text in fig.findobj(match=lambda artist: isinstance(artist, plt.Text)):
+        updated = _human_label(text.get_text())
+        if updated != text.get_text():
+            text.set_text(updated)
     fig.savefig(path, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
 
@@ -370,32 +390,34 @@ def plot_lifecycle(frame: pd.DataFrame, path: Path) -> None:
 
 
 def plot_metadata_counts(frame: pd.DataFrame, path: Path) -> None:
-    """Grouped columns for the three metadata count summaries."""
+    """Grouped columns for metadata summaries. The top-left panel is the share of issues with a label."""
     bot, user = split_groups(frame)
     plot_df = _account_frame(
-        ["Label count", "Archive events", "Milestone"],
+        ["Issues with a label", "Label count", "Archive events", "Milestone"],
         [
+            100 * float(bot["has_label"].mean()),
             float(bot["n_labels"].mean()),
             float(bot["n_gharchive_events"].mean()),
             100 * float(bot["has_milestone"].mean()),
         ],
         [
+            100 * float(user["has_label"].mean()),
             float(user["n_labels"].mean()),
             float(user["n_gharchive_events"].mean()),
             100 * float(user["has_milestone"].mean()),
         ],
         "Value",
     )
-    # Milestone is a share. Plot it on its own axis so a 3% bar is readable
-    # beside means that sit near 1.
-    count_df = plot_df.loc[plot_df["Metric"].isin(["Label count", "Archive events"])]
-    milestone_df = plot_df.loc[plot_df["Metric"].eq("Milestone")]
-
-    fig, axes = plt.subplots(1, 3, figsize=(7.25, 3.05), gridspec_kw={"width_ratios": [1.15, 1.15, 0.85]})
+    fig, axes = plt.subplots(2, 2, figsize=(7.16, 4.35))
     panels = [
-        (axes[0], count_df.loc[count_df["Metric"].eq("Label count")], "Label count", "Mean labels per issue", "{:.2f}", 0, 1.7),
-        (axes[1], count_df.loc[count_df["Metric"].eq("Archive events")], "Archive events", "Mean events per issue", "{:.2f}", 0, 2.05),
-        (axes[2], milestone_df, "Milestone", "Percent of issues", "{:.1f}", 0, 6),
+        (axes[0, 0], "Issues with a label", "Percent of issues", "{:.1f}", 0, 100),
+        (axes[0, 1], "Label count", "Mean labels per issue", "{:.2f}", 0, 1.7),
+        (axes[1, 0], "Archive events", "Mean events per issue", "{:.2f}", 0, 2.05),
+        (axes[1, 1], "Milestone", "Percent of issues", "{:.1f}", 0, 6),
+    ]
+    panels = [
+        (ax, plot_df.loc[plot_df["Metric"].eq(title)], title, ylabel, fmt, ymin, ymax)
+        for ax, title, ylabel, fmt, ymin, ymax in panels
     ]
     for ax, data, title, ylabel, fmt, ymin, ymax in panels:
         sns.barplot(

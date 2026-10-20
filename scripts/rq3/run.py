@@ -447,7 +447,7 @@ def plot_grouped_prevalence(frame: pd.DataFrame, column: str, order: list[str], 
     fig, ax = plt.subplots(figsize=(fig_w, 3.3))
     x = np.arange(len(order))
     ax.bar(x - 0.18, rates.loc["Bot"], width=0.36, color=BOT_COLOR, label="Bot")
-    ax.bar(x + 0.18, rates.loc["User"], width=0.36, color=USER_COLOR, label="User")
+    ax.bar(x + 0.18, rates.loc["User"], width=0.36, color=USER_COLOR, label="Human")
     ax.set_xticks(x, order, rotation=30, ha="right")
     ax.set_ylabel("Percent of sampled issues")
     ax.set_title(title)
