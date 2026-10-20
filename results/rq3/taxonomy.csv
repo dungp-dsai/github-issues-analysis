@@ -1,8 +1,0 @@
-category,definition,source
-BUG,"Corrective maintenance: the report describes defective behavior (incorrect output, a crash, a regression, or a broken feature) and the requested work is a semantic code fix.","Herzig et al., ICSE 2013"
-RFE,Request for enhancement: the report asks for new functionality that the project does not already provide.,"Herzig et al., ICSE 2013"
-IMPR,"Perfective improvement: the report asks to improve the performance or the handling of functionality that already exists, without adding a new feature and without only restructuring code.","Herzig et al., ICSE 2013"
-DOC,"Documentation: the requested work is an update to docs, a README, comments, examples, or other written project documentation.","Herzig et al., ICSE 2013"
-REFAC,Refactoring: the report asks to restructure existing code while keeping the intended behavior.,"Herzig et al., ICSE 2013"
-QUESTION,"Question: the author wants an explanation, usage help, or clarification, and is not primarily reporting a defect or asking for a change. If defective behavior is reported, choose BUG even when the wording is a question.","Kallis et al., Ticket Tagger (GitHub issue types)"
-OTHER,"None of the above. This residual class includes tests, dependency and CI changes, release or backport tasks, specification changes, cleanup, and general development tasks.","Herzig et al., ICSE 2013 residual class"

@@ -504,15 +504,21 @@ def plot_reactions(frame: pd.DataFrame, path: Path) -> None:
 
     sns.set_theme(style="white", palette="pastel")
     bot, user = split_groups(frame)
+
+    def _shares(part: pd.DataFrame) -> pd.Series:
+        counts = part[REACTION_COLUMNS].sum().to_numpy(dtype=float)
+        total = float(counts.sum())
+        tenths = counts / total * 1000
+        floors = np.floor(tenths + 1e-9).astype(int)
+        leftover = 1000 - int(floors.sum())
+        order = np.argsort(-(tenths - floors), kind="stable")
+        for index in order[:leftover]:
+            floors[index] += 1
+        return pd.Series(floors / 10, index=REACTION_COLUMNS)
+
     rows = []
     for column in REACTION_COLUMNS:
-        rows.append(
-            {
-                "reaction": column,
-                "Bot": 100 * float(bot[column].gt(0).mean()),
-                "User": 100 * float(user[column].gt(0).mean()),
-            }
-        )
+        rows.append({"reaction": column, "Bot": float(_shares(bot)[column]), "User": float(_shares(user)[column])})
     rates = pd.DataFrame(rows)
     peak = float(rates[["Bot", "User"]].to_numpy().max())
     icons = {column: _reaction_icon(REACTION_EMOJI[column]) for column in REACTION_COLUMNS}
@@ -541,7 +547,7 @@ def plot_reactions(frame: pd.DataFrame, path: Path) -> None:
             for patch in bar:
                 patch.set_linewidth(0.7)
                 patch.set_edgecolor("white")
-        texts = ["<0.1" if value < 0.05 else f"{value:.1f}" for value in ordered[account]]
+        texts = [f"{value:.1f}" for value in ordered[account]]
         ax.bar_label(ax.containers[0], labels=texts, padding=3, fontsize=8, color="#333333")
         tick_names = [tick.get_text() for tick in ax.get_yticklabels()]
         ax.set_yticklabels([])
@@ -562,7 +568,7 @@ def plot_reactions(frame: pd.DataFrame, path: Path) -> None:
             ax.add_artist(mark)
         ax.set_xlim(0, max(peak * 1.22, 5))
         ax.set_ylabel("")
-        ax.set_xlabel("Percent of issues")
+        ax.set_xlabel("Percent of reactions")
         ax.set_title(title)
         ax.grid(False)
         part = groups[account]
@@ -605,10 +611,22 @@ def _sankey_ribbon(ax: plt.Axes, x0: float, x1: float, y0_lo: float, y0_hi: floa
 
 
 def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Path) -> None:
-    """Assignee links from the issue author type to four named logins and a User group."""
+    """Assignee links from the issue author type to a known Bot or User assignee."""
     linked = assignees.merge(frame[["issue_id", "author_type"]], on="issue_id", how="inner")
-    top = linked["assignee_login"].value_counts().head(4).index.tolist()
-    linked["destination"] = linked["assignee_login"].where(linked["assignee_login"].isin(top), "User")
+    known = frame.groupby("author_login")["author_type"].agg(lambda values: set(values))
+
+    def _assignee_group(login: str) -> str:
+        if login == "Copilot" or login.endswith("[bot]") or login.lower().endswith("-bot"):
+            return "Bot"
+        account = known.get(login)
+        if account == {"User"}:
+            return "User"
+        if account == {"Bot"}:
+            return "Bot"
+        return "Other"
+
+    linked["destination"] = linked["assignee_login"].map(_assignee_group)
+    linked = linked.loc[linked["destination"].ne("Other")].copy()
     flows = linked.groupby(["author_type", "destination"]).size().to_dict()
 
     source_order = ["Bot", "User"]
@@ -648,11 +666,25 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
     sns.set_theme(style="white", palette="pastel")
     pastel = sns.color_palette("pastel", 6)
     source_color = {"Bot": pastel[0], "User": pastel[1]}
-    dest_color = {"User": pastel[1]}
-    for name, color in zip([name for name in dest_order if name != "User"], pastel[2:]):
-        dest_color[name] = color
+    dest_color = {"Bot": pastel[0], "User": pastel[1], "Other": pastel[2]}
 
-    fig, ax = plt.subplots(figsize=(7.16, 5.0))
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(8.8, 4.35),
+        gridspec_kw={"width_ratios": [1, 2.45], "wspace": 0.06},
+    )
+    ax_bar, ax = axes
+    bot, user = split_groups(frame)
+    rates = [100 * float(bot["has_assignee"].mean()), 100 * float(user["has_assignee"].mean())]
+    bars = ax_bar.bar(["Bot", "User"], rates, color=[pastel[0], pastel[1]], width=0.62, edgecolor="white", linewidth=0.7, zorder=2)
+    ax_bar.bar_label(bars, fmt="%.1f", padding=3, fontsize=8, color="#333333")
+    ax_bar.set_ylim(0, 100)
+    ax_bar.set_ylabel("Percent of issues")
+    ax_bar.set_title("(a) Issues with an assignee")
+    ax_bar.grid(False)
+    ax_bar.spines["top"].set_visible(False)
+    ax_bar.spines["right"].set_visible(False)
     x0, x1 = 0.20, 0.68
     node_w = 0.028
     ribbon_x0 = x0 + node_w
@@ -675,6 +707,8 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
             _sankey_ribbon(ax, ribbon_x0, x1, y0_lo, y0_hi, y1_lo, y1_hi, source_color[source])
             streams.append(
                 {
+                    "source": source,
+                    "dest": dest,
                     "y0_lo": y0_lo,
                     "y0_hi": y0_hi,
                     "y1_lo": y1_lo,
@@ -703,11 +737,7 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
     for name in dest_order:
         _draw_node(dest_boxes[name], x1, dest_color[name])
         lo, hi = dest_boxes[name]
-        center = (lo + hi) / 2
-        if hi - lo >= total_height * 0.08:
-            ax.text(x1 + node_w / 2, center, name, ha="center", va="center", fontsize=8, color="#222222", zorder=4)
-        else:
-            outside.append((center, name))
+        outside.append(((lo + hi) / 2, "Unknown User Type" if name == "Other" else name))
 
     outside.sort()
     min_gap = total_height * 0.075
@@ -724,74 +754,31 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
     for (center, name), y_label in zip(outside, placed):
         _stick(x1 + node_w, center, x1 + node_w + 0.045, y_label, name, "left")
 
-    def _at(stream: dict, blend: float) -> tuple[float, float]:
+    # Each ribbon carries its share of that author's assignee links.
+    # A crossing ribbon is labeled where its band is clear of the others.
+    def _band(stream: dict, blend: float) -> tuple[float, float]:
         y_hi = stream["y0_hi"] + (stream["y1_hi"] - stream["y0_hi"]) * blend
         y_lo = stream["y0_lo"] + (stream["y1_lo"] - stream["y0_lo"]) * blend
-        return (y_lo + y_hi) / 2, (y_hi - y_lo) / 2
+        return ribbon_x0 + blend * (x1 - ribbon_x0), (y_lo + y_hi) / 2
 
-    def _buried(stream: dict, blend: float, others: list[dict]) -> bool:
-        y_tip, half = _at(stream, blend)
-        for other in others:
-            other_y, other_half = _at(other, blend)
-            if other_half > half * 2 and abs(y_tip - other_y) < other_half + 24:
-                return True
-        return False
-
-    # Share of that author's links. The stick ends at the middle of the ribbon.
-    # A thin ribbon that crosses a wider one is marked where it is still its own band.
-    marked = []
-    for stream in streams:
-        others = [other for other in streams if other is not stream]
+    placed_labels: list[tuple[float, float]] = []
+    for stream in sorted(streams, key=lambda item: item["pct"], reverse=True):
         blend = 0.5
-        if _buried(stream, blend, others):
-            for step in range(1, 22):
-                trial = 0.5 - step * 0.02
-                if trial < 0.08:
-                    break
-                if not _buried(stream, trial, others):
-                    blend = trial
-                    break
-        y_tip, half = _at(stream, blend)
-        marked.append(
-            {
-                "x": ribbon_x0 + blend * (x1 - ribbon_x0),
-                "y": y_tip,
-                "half": half,
-                "pct": stream["pct"],
-                "wide": half >= total_height * 0.08,
-            }
-        )
-
-    marked.sort(key=lambda item: item["y"])
-    label_gap = total_height * 0.062
-    for index, item in enumerate(marked):
-        if item["wide"]:
-            item["ly"] = item["y"] + item["half"] * 0.38
-            item["lx"] = item["x"]
-        else:
-            item["ly"] = item["y"] + max(item["half"] + label_gap * 0.55, label_gap * 0.7)
-            item["lx"] = item["x"] - 0.055 if index % 2 == 0 else item["x"] + 0.055
-    for _pass in range(10):
-        for index in range(1, len(marked)):
-            below, above = marked[index - 1], marked[index]
-            if abs(above["lx"] - below["lx"]) > 0.12:
-                continue
-            if above["ly"] - below["ly"] < label_gap:
-                shift = (label_gap - (above["ly"] - below["ly"])) / 2
-                below["ly"] -= shift * 0.35
-                above["ly"] += shift
-    for item in marked:
-        x_line = item["lx"] + (0.028 if item["lx"] < item["x"] else -0.028 if item["lx"] > item["x"] else 0)
-        y_line = item["ly"]
-        if item["wide"]:
-            y_line = item["ly"] - label_gap * 0.22
-            x_line = item["lx"]
-        ax.plot([item["x"], x_line], [item["y"], y_line], color="#6e6e6e", linewidth=0.7, zorder=4, solid_capstyle="round")
-        ax.plot(item["x"], item["y"], marker="o", markersize=3.0, color="#4a4a4a", zorder=5)
+        x_label, y_label = _band(stream, blend)
+        if any(abs(y_label - prior_y) < total_height * 0.07 for _, prior_y in placed_labels):
+            options = []
+            for trial in (0.78, 0.22, 0.68, 0.32):
+                trial_x, trial_y = _band(stream, trial)
+                gap = min((abs(trial_y - prior_y) for _, prior_y in placed_labels), default=total_height)
+                options.append((gap, trial_x, trial_y))
+            _, x_label, y_label = max(options)
+        placed_labels.append((x_label, y_label))
+        pct = stream["pct"]
+        text = f"{pct:.0f}%" if abs(pct - round(pct)) < 0.05 else f"{pct:.1f}%"
         ax.text(
-            item["lx"],
-            item["ly"],
-            f"{item['pct']:.1f}%",
+            x_label,
+            y_label,
+            text,
             ha="center",
             va="center",
             fontsize=8,
@@ -800,15 +787,16 @@ def plot_assignee_sankey(frame: pd.DataFrame, assignees: pd.DataFrame, path: Pat
             bbox={"boxstyle": "round,pad=0.16", "facecolor": "white", "edgecolor": "none", "alpha": 0.94},
         )
 
-    ax.set_xlim(-0.02, 1.02)
+    ax.set_xlim(0.10, 0.96)
     ax.set_ylim(-total_height * 0.03, total_height * 1.04)
     ax.set_yticks([])
     ax.set_xticks([x0 + node_w / 2, x1 + node_w / 2], ["Issue author", "Assignee"])
-    ax.tick_params(axis="x", length=0, labelsize=9, pad=8)
+    ax.tick_params(axis="x", length=0, labelsize=8, pad=6)
+    ax.set_title("(b) Assignee account type")
     for spine in ax.spines.values():
         spine.set_visible(False)
     ax.grid(False)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.07, right=0.99, wspace=0.06)
     fig.savefig(path, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
 
